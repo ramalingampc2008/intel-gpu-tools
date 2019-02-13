@@ -40,6 +40,13 @@ struct data {
 #define CP_DESIRED				1
 #define CP_ENABLED				2
 
+/*
+ * CP_TYPE_0 can be handled on both HDCP1.4 and HDCP2.2. Where as CP_TYPE_1
+ * can be handled only through HDCP2.2.
+ */
+#define CP_TYPE_0				0
+#define CP_TYPE_1				1
+
 #define LIC_PERIOD_MSEC				(4 * 1000)
 /* Kernel retry count=3, Max time per authentication allowed = 6Sec */
 #define KERNEL_AUTH_TIME_ALLOWED_MSEC		(3 *  6 * 1000)
@@ -155,7 +162,8 @@ static void modeset_with_fb(const enum pipe pipe, igt_output_t *output,
 	commit_display_and_wait_for_flip(s);
 }
 
-static bool test_cp_enable(igt_output_t *output, enum igt_commit_style s)
+static bool test_cp_enable(igt_output_t *output, enum igt_commit_style s,
+			   int content_type)
 {
 	igt_display_t *display = &data.display;
 	igt_plane_t *primary;
@@ -165,6 +173,9 @@ static bool test_cp_enable(igt_output_t *output, enum igt_commit_style s)
 
 	igt_output_set_prop_value(output,
 				  IGT_CONNECTOR_CONTENT_PROTECTION, CP_DESIRED);
+	if (output->props[IGT_CONNECTOR_CP_CONTENT_TYPE])
+		igt_output_set_prop_value(output, IGT_CONNECTOR_CP_CONTENT_TYPE,
+					  content_type);
 	igt_display_commit2(display, s);
 
 	ret = wait_for_prop_value(output, CP_ENABLED,
@@ -201,13 +212,14 @@ static void test_cp_disable(igt_output_t *output, enum igt_commit_style s)
 }
 
 static void test_cp_enable_with_retry(igt_output_t *output,
-				      enum igt_commit_style s, int retry)
+				      enum igt_commit_style s, int retry,
+				      int content_type)
 {
 	bool ret;
 
 	do {
 		test_cp_disable(output, s);
-		ret = test_cp_enable(output, s);
+		ret = test_cp_enable(output, s, content_type);
 
 		if (!ret && --retry)
 			igt_debug("Retry (%d/2) ...\n", 3 - retry);
@@ -237,7 +249,7 @@ static void test_cp_lic(igt_output_t *output)
 
 static void test_content_protection_on_output(igt_output_t *output,
 					      enum igt_commit_style s,
-					      bool dpms_test)
+					      bool dpms_test, int content_type)
 {
 	igt_display_t *display = &data.display;
 	igt_plane_t *primary;
@@ -258,7 +270,7 @@ static void test_content_protection_on_output(igt_output_t *output,
 			continue;
 
 		modeset_with_fb(pipe, output, s);
-		test_cp_enable_with_retry(output, s, 3);
+		test_cp_enable_with_retry(output, s, 3, content_type);
 		test_cp_lic(output);
 
 		if (dpms_test) {
@@ -273,7 +285,8 @@ static void test_content_protection_on_output(igt_output_t *output,
 			ret = wait_for_prop_value(output, CP_ENABLED,
 						  KERNEL_AUTH_TIME_ALLOWED_MSEC);
 			if (!ret)
-				test_cp_enable_with_retry(output, s, 2);
+				test_cp_enable_with_retry(output, s,
+							  2, content_type);
 		}
 
 		test_cp_disable(output, s);
@@ -300,7 +313,8 @@ static void __debugfs_read(int fd, const char *param, char *buf, int len)
 
 #define debugfs_read(fd, p, arr) __debugfs_read(fd, p, arr, sizeof(arr))
 
-#define MAX_SINK_HDCP_CAP_BUF_LEN	500
+#define MAX_SINK_HDCP_CAP_BUF_LEN	5000
+
 static bool sink_hdcp_capable(igt_output_t *output)
 {
 	char buf[MAX_SINK_HDCP_CAP_BUF_LEN];
@@ -318,9 +332,26 @@ static bool sink_hdcp_capable(igt_output_t *output)
 	return strstr(buf, "HDCP1.4");
 }
 
+static bool sink_hdcp2_capable(igt_output_t *output)
+{
+	char buf[MAX_SINK_HDCP_CAP_BUF_LEN];
+	int fd;
+
+	fd = igt_debugfs_connector_dir(data.drm_fd, output->name, O_RDONLY);
+	if (fd < 0)
+		return false;
+
+	debugfs_read(fd, "i915_hdcp_sink_capability", buf);
+	close(fd);
+
+	igt_debug("Sink capability: %s\n", buf);
+
+	return strstr(buf, "HDCP2.2");
+}
 
 static void
-test_content_protection(enum igt_commit_style s, bool dpms_test)
+test_content_protection(enum igt_commit_style s, bool dpms_test,
+			int content_type)
 {
 	igt_display_t *display = &data.display;
 	igt_output_t *output;
@@ -330,14 +361,24 @@ test_content_protection(enum igt_commit_style s, bool dpms_test)
 		if (!output->props[IGT_CONNECTOR_CONTENT_PROTECTION])
 			continue;
 
+		if (!output->props[IGT_CONNECTOR_CP_CONTENT_TYPE] &&
+		    content_type)
+			continue;
+
 		igt_info("CP Test execution on %s\n", output->name);
-		if (!sink_hdcp_capable(output)) {
+
+		if (content_type && !sink_hdcp2_capable(output)) {
+			igt_info("\tSkip %s (Sink has no HDCP2.2 support)\n",
+				 output->name);
+			continue;
+		} else if (!sink_hdcp_capable(output)) {
 			igt_info("\tSkip %s (Sink has no HDCP support)\n",
 				 output->name);
 			continue;
 		}
 
-		test_content_protection_on_output(output, s, dpms_test);
+		test_content_protection_on_output(output, s, dpms_test,
+						  content_type);
 		valid_tests++;
 	}
 
@@ -355,16 +396,21 @@ igt_main
 	}
 
 	igt_subtest("legacy")
-		test_content_protection(COMMIT_LEGACY, false);
+		test_content_protection(COMMIT_LEGACY, false, CP_TYPE_0);
 
 	igt_subtest("atomic") {
 		igt_require(data.display.is_atomic);
-		test_content_protection(COMMIT_ATOMIC, false);
+		test_content_protection(COMMIT_ATOMIC, false, CP_TYPE_0);
 	}
 
 	igt_subtest("atomic-dpms") {
 		igt_require(data.display.is_atomic);
-		test_content_protection(COMMIT_ATOMIC, true);
+		test_content_protection(COMMIT_ATOMIC, true, CP_TYPE_0);
+	}
+
+	igt_subtest("Type1") {
+		igt_require(data.display.is_atomic);
+		test_content_protection(COMMIT_ATOMIC, false, CP_TYPE_1);
 	}
 
 	igt_fixture
