@@ -200,6 +200,7 @@ const char * const igt_connector_prop_names[IGT_NUM_CONNECTOR_PROPS] = {
 	[IGT_CONNECTOR_CONTENT_PROTECTION] = "Content Protection",
 	[IGT_CONNECTOR_VRR_CAPABLE] = "vrr_capable",
 	[IGT_CONNECTOR_CP_CONTENT_TYPE] = "Content_protection_type",
+	[IGT_CONNECTOR_CP_DOWNSTREAM_INFO] = "CP_downstream_info",
 };
 
 /*
