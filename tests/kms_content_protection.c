@@ -27,6 +27,7 @@
 #include "igt.h"
 #include "igt_sysfs.h"
 #include "igt_kms.h"
+#include "igt_kmod.h"
 
 IGT_TEST_DESCRIPTION("Test content protection (HDCP)");
 
@@ -213,7 +214,7 @@ static void test_cp_disable(igt_output_t *output, enum igt_commit_style s)
 
 static void test_cp_enable_with_retry(igt_output_t *output,
 				      enum igt_commit_style s, int retry,
-				      int content_type)
+				      int content_type, bool expect_failure)
 {
 	bool ret;
 
@@ -224,7 +225,12 @@ static void test_cp_enable_with_retry(igt_output_t *output,
 		if (!ret && --retry)
 			igt_debug("Retry (%d/2) ...\n", 3 - retry);
 	} while (retry && !ret);
-	igt_assert_f(ret, "Content Protection not enabled\n");
+
+	if (expect_failure)
+		igt_assert_f(!ret,
+			     "CP Enabled. Though it is expected to fail\n");
+	else
+		igt_assert_f(ret, "Content Protection not enabled\n");
 }
 
 static bool igt_pipe_is_free(igt_display_t *display, enum pipe pipe)
@@ -247,9 +253,10 @@ static void test_cp_lic(igt_output_t *output)
 	igt_assert_f(!ret, "Content Protection LIC Failed\n");
 }
 
-static void test_content_protection_on_output(igt_output_t *output,
-					      enum igt_commit_style s,
-					      bool dpms_test, int content_type)
+static void
+test_content_protection_on_output(igt_output_t *output, enum igt_commit_style s,
+				  bool dpms_test, int content_type,
+				  bool mei_reload_test)
 {
 	igt_display_t *display = &data.display;
 	igt_plane_t *primary;
@@ -270,7 +277,24 @@ static void test_content_protection_on_output(igt_output_t *output,
 			continue;
 
 		modeset_with_fb(pipe, output, s);
-		test_cp_enable_with_retry(output, s, 3, content_type);
+		test_cp_enable_with_retry(output, s, 3, content_type, false);
+
+		if (mei_reload_test) {
+			igt_assert_f(!igt_kmod_unload("mei_hdcp", 0),
+				     "mei_hdcp unload failed");
+
+			/* Expected to fail */
+			test_cp_enable_with_retry(output, s, 3,
+						  content_type, false, true);
+
+			igt_assert_f(!igt_kmod_load("mei_hdcp", NULL),
+				     "mei_hdcp load failed");
+
+			/* Expected to pass */
+			test_cp_enable_with_retry(output, s, 3,
+						  content_type, false, false);
+		}
+
 		test_cp_lic(output);
 
 		if (dpms_test) {
@@ -285,8 +309,8 @@ static void test_content_protection_on_output(igt_output_t *output,
 			ret = wait_for_prop_value(output, CP_ENABLED,
 						  KERNEL_AUTH_TIME_ALLOWED_MSEC);
 			if (!ret)
-				test_cp_enable_with_retry(output, s,
-							  2, content_type);
+				test_cp_enable_with_retry(output, s, 2,
+							  content_type, false);
 		}
 
 		test_cp_disable(output, s);
@@ -351,11 +375,15 @@ static bool sink_hdcp2_capable(igt_output_t *output)
 
 static void
 test_content_protection(enum igt_commit_style s, bool dpms_test,
-			int content_type)
+			int content_type, bool mei_reload_test)
 {
 	igt_display_t *display = &data.display;
 	igt_output_t *output;
 	int valid_tests = 0;
+
+	if (mei_reload_test)
+		igt_require_f(igt_kmod_is_loaded("mei_hdcp"),
+			      "mei_hdcp module is not loaded\n");
 
 	for_each_connected_output(display, output) {
 		if (!output->props[IGT_CONNECTOR_CONTENT_PROTECTION])
@@ -378,7 +406,8 @@ test_content_protection(enum igt_commit_style s, bool dpms_test,
 		}
 
 		test_content_protection_on_output(output, s, dpms_test,
-						  content_type);
+						  content_type,
+						  mei_reload_test);
 		valid_tests++;
 	}
 
@@ -396,21 +425,31 @@ igt_main
 	}
 
 	igt_subtest("legacy")
-		test_content_protection(COMMIT_LEGACY, false, CP_TYPE_0);
+		test_content_protection(COMMIT_LEGACY, false, CP_TYPE_0,
+					false);
 
 	igt_subtest("atomic") {
 		igt_require(data.display.is_atomic);
-		test_content_protection(COMMIT_ATOMIC, false, CP_TYPE_0);
+		test_content_protection(COMMIT_ATOMIC, false, CP_TYPE_0,
+					false);
 	}
 
 	igt_subtest("atomic-dpms") {
 		igt_require(data.display.is_atomic);
-		test_content_protection(COMMIT_ATOMIC, true, CP_TYPE_0);
+		test_content_protection(COMMIT_ATOMIC, true, CP_TYPE_0,
+					false);
 	}
 
 	igt_subtest("Type1") {
 		igt_require(data.display.is_atomic);
-		test_content_protection(COMMIT_ATOMIC, false, CP_TYPE_1);
+		test_content_protection(COMMIT_ATOMIC, false, CP_TYPE_1,
+					false);
+	}
+
+	igt_subtest("type1_mei_interface") {
+		igt_require(data.display.is_atomic);
+		test_content_protection(COMMIT_ATOMIC, false, CP_TYPE_1,
+					true);
 	}
 
 	igt_fixture
